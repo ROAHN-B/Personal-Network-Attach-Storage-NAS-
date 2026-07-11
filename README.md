@@ -21,6 +21,9 @@ This project transforms an ESP32 into a portable NAS that can:
 
 ---
 
+## Images and Video 
+![Hardware](assets/Asset_1.jpeg)
+
 ## ✨ Features
 
 ### File Management

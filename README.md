@@ -22,9 +22,14 @@ This project transforms an ESP32 into a portable NAS that can:
 ---
 
 ## Images and Video 
-<img src="assets/Asset_1.jpeg" width="300">
-<img src="assets/Asset_2.jpeg" width="300">
-<img src="assets/Asset_3.jpeg" width="300">
+<p align="center">
+    <img src="assets/Asset_1.jpeg" width="800">
+</p>
+
+<p align="center">
+    <img src="assets/Asset_2.jpeg" height="350">
+    <img src="assets/Asset_3.jpeg" height="350">
+</p>
 
 
 ## ✨ Features

@@ -28,8 +28,8 @@ const char* HOSTNAME      = "mediaserver";
 #define SD_SCK_PIN  18
 
 // Authentication — change these before flashing!
-const char* AUTH_USERNAME = "admin";
-const char* AUTH_PASSWORD = "rohan123";
+const char* AUTH_USERNAME = // AUTH_USERNAME
+const char* AUTH_PASSWORD = // AUTH_PASSWORD
 
 // Google Drive — from get_refresh_token.py output. Treat as secrets: don't share/commit.
 const char* DRIVE_CLIENT_ID     = // Drive_Client_ID

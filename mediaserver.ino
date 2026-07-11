@@ -31,10 +31,10 @@ const char* AUTH_USERNAME = "admin";
 const char* AUTH_PASSWORD = "rohan123";
 
 // Google Drive — from get_refresh_token.py output. Treat as secrets: don't share/commit.
-const char* DRIVE_CLIENT_ID     = "791272166374-b9fusoesvns0kl2uj3fvt3g38op7vicf.apps.googleusercontent.com";
-const char* DRIVE_CLIENT_SECRET = "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";
-const char* DRIVE_REFRESH_TOKEN = "1//0gzCfZp3tfM2PCgYIARAAGBASNwF-L9Ircf9NWbIb32nPPh__57Ys7wlbk1Z90lg-3ZQy5EUoHDgwM8LXxLxUtvTv-XwhFARWeyE";
-const char* DRIVE_FOLDER_ID     = "1mTjQBYJD1DFc3kTTAXq3iaFaaMbVkaAZ";
+const char* DRIVE_CLIENT_ID     = // Drive_Client_ID
+const char* DRIVE_CLIENT_SECRET = // Drive_Client_Secret
+const char* DRIVE_REFRESH_TOKEN = // Drive_Refresh_Token
+const char* DRIVE_FOLDER_ID     = //Drive_folder_ID
 // -----------------------------------------
 
 AsyncWebServer server(80);

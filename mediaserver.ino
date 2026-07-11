@@ -15,9 +15,10 @@ String pushPath = "";
 String lastPushResult = "No push performed yet.";
 
 // ---------- CONFIG: EDIT THESE ----------
-const char* WIFI_SSID     = "Redmi 12 5G";
-const char* WIFI_PASSWORD = "123456789";
-const char* PREVIEW_KEY = "nasPreviewKey987"; 
+//NOTE:Frequency of WIFI should be at 2.4GHz
+const char* WIFI_SSID     = //WI-FI name
+const char* WIFI_PASSWORD = // WI-FI password
+const char* PREVIEW_KEY = "nasPreviewKey987" 
 const char* HOSTNAME      = "mediaserver";   
 
 

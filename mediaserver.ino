@@ -6,6 +6,21 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <rickmoo_qrcode.h>
+#include <memory>
+
+struct PageGenState {
+  int step = 0;            // 0=head/topbar/grid-open, 1=folder loop, 2=tail, 3=done
+  int folderIdx = 0;       // which folder we're currently listing
+  bool folderOpened = false;
+  bool folderAny = false;  // did the current folder have any files?
+  File manifestFile;       // currently-open SD manifest file handle
+  String pending;          // leftover text not yet flushed into the network buffer
+};
+
 
 volatile bool syncRequested = false;
 String lastSyncResult = "No sync performed yet.";
@@ -16,9 +31,9 @@ String lastPushResult = "No push performed yet.";
 
 // ---------- CONFIG: EDIT THESE ----------
 //NOTE:Frequency of WIFI should be at 2.4GHz
-const char* WIFI_SSID     = //WI-FI name
-const char* WIFI_PASSWORD = // WI-FI password
-const char* PREVIEW_KEY = "nasPreviewKey987" 
+const char* WIFI_SSID     = "Redmi 12 5G";
+const char* WIFI_PASSWORD = "123456789";
+const char* PREVIEW_KEY = "nasPreviewKey987" ;
 const char* HOSTNAME      = "mediaserver";   
 
 
@@ -26,16 +41,26 @@ const char* HOSTNAME      = "mediaserver";
 #define SD_MOSI_PIN 23
 #define SD_MISO_PIN 19
 #define SD_SCK_PIN  18
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// I2C Pins
+#define OLED_SDA 21
+#define OLED_SCL 22
+
+String ngrokURL = "https://sympathy-deafness-borough.ngrok-free.dev";
 
 // Authentication — change these before flashing!
-const char* AUTH_USERNAME = // AUTH_USERNAME
-const char* AUTH_PASSWORD = // AUTH_PASSWORD
+const char* AUTH_USERNAME = "Admin";
+const char* AUTH_PASSWORD = "rohan123";
 
-// Google Drive — from get_refresh_token.py output. Treat as secrets: don't share/commit.
-const char* DRIVE_CLIENT_ID     = // Drive_Client_ID
-const char* DRIVE_CLIENT_SECRET = // Drive_Client_Secret
-const char* DRIVE_REFRESH_TOKEN = // Drive_Refresh_Token
-const char* DRIVE_FOLDER_ID     = //Drive_folder_ID
+// Google Drive — from get_refres_token.py output. Treat as secrets: don't share/commit.
+const char* DRIVE_CLIENT_ID     ="791272166374-b9fusoesvns0kl2uj3fvt3g38op7vicf.apps.googleusercontent.com";
+const char* DRIVE_CLIENT_SECRET ="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";
+const char* DRIVE_REFRESH_TOKEN ="1//0g_Su_AynAq1_CgYIARAAGBASNwF-L9Irw2tvSJS98-VGQ1eANvo47AbpdfaVJ187sCf-x0M_wjwt2OwsMlCFZjHBzESUyEfLprY";
+const char* DRIVE_FOLDER_ID     ="1mTjQBYJD1DFc3kTTAXq3iaFaaMbVkaAZ";
 // -----------------------------------------
 
 AsyncWebServer server(80);
@@ -64,9 +89,7 @@ void ensureFolders() {
   }
 }
 
-// Re-initializes the SD card connection. Use this after swapping the card
-// without rebooting the ESP32. Best practice is still to power off before
-// swapping, but this recovers the SD library's state either way.
+// Re-initializes the SD card connection.
 bool remountSD() {
   SD.end();
   delay(300); // give the card a moment to settle
@@ -80,8 +103,87 @@ bool remountSD() {
   return ok;
 }
 
-// Purely cosmetic helper: picks a small emoji icon based on file extension.
-// Does not affect any file handling, only how the file is displayed.
+// ================= MANIFEST HELPER FUNCTIONS =================
+
+// Ensures we don't add duplicate filenames if overwriting an existing file
+void appendToManifest(const String& folder, const String& filename) {
+  String manifestPath = folder + "/.manifest.txt";
+  bool existsInManifest = false;
+  
+  File mRead = SD.open(manifestPath);
+  if (mRead) {
+    while (mRead.available()) {
+      String line = mRead.readStringUntil('\n');
+      line.trim();
+      if (line == filename) {
+        existsInManifest = true;
+        break;
+      }
+    }
+    mRead.close();
+  }
+
+  if (!existsInManifest) {
+    File mWrite = SD.open(manifestPath, FILE_APPEND);
+    if (mWrite) {
+      mWrite.println(filename);
+      mWrite.close();
+    }
+  }
+}
+
+// Rewrites the manifest excluding the deleted file
+void removeFromManifest(const String& folder, const String& filename) {
+  String manifestPath = folder + "/.manifest.txt";
+  String tempPath = folder + "/.manifest_tmp.txt";
+  
+  File m = SD.open(manifestPath, FILE_READ);
+  File t = SD.open(tempPath, FILE_WRITE);
+  
+  if (m && t) {
+    while (m.available()) {
+      String line = m.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 0 && line != filename && line != ".manifest.txt") {
+        t.println(line);
+      }
+    }
+    m.close();
+    t.close();
+    SD.remove(manifestPath);
+    SD.rename(tempPath, manifestPath);
+  }
+}
+
+// Rewrites the manifest substituting the old name for the new one
+void renameInManifest(const String& folder, const String& oldName, const String& newName) {
+  String manifestPath = folder + "/.manifest.txt";
+  String tempPath = folder + "/.manifest_tmp.txt";
+  
+  File m = SD.open(manifestPath, FILE_READ);
+  File t = SD.open(tempPath, FILE_WRITE);
+  
+  if (m && t) {
+    while (m.available()) {
+      String line = m.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 0) {
+        if (line == oldName) {
+          t.println(newName);
+        } else {
+          t.println(line);
+        }
+      }
+    }
+    m.close();
+    t.close();
+    SD.remove(manifestPath);
+    SD.rename(tempPath, manifestPath);
+  }
+}
+
+// ================= END MANIFEST HELPER FUNCTIONS =================
+
 String getFileIcon(const String& name) {
   String n = name;
   n.toLowerCase();
@@ -94,9 +196,6 @@ String getFileIcon(const String& name) {
   return "&#128196;";
 }
 
-// Purely cosmetic/UI helper: classifies a file so the front-end knows whether it can
-// show an in-browser preview (image/video/audio/pdf/text/docx) or should fall back to
-// normal link behavior. Does not change how any file is stored or served.
 String getFileKind(const String& name) {
   String n = name;
   n.toLowerCase();
@@ -114,7 +213,24 @@ String escapeForJsAttr(const String& s) {
   out.replace("'", "\\'");
   return out;
 }
-// Server-side MIME lookup for streaming audio/video with proper Content-Type + Range support
+
+String htmlEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    switch (c) {
+      case '&':  out += "&amp;";  break;
+      case '<':  out += "&lt;";   break;
+      case '>':  out += "&gt;";   break;
+      case '"':  out += "&quot;"; break;
+      case '\'': out += "&#39;";  break;
+      default:   out += c;
+    }
+  }
+  return out;
+}
+
 String getMimeForPath(const String& path) {
   String p = path;
   p.toLowerCase();
@@ -131,7 +247,6 @@ String getMimeForPath(const String& path) {
   return "application/octet-stream";
 }
 
-// Purely cosmetic helper: friendlier size string. Same underlying size, just nicer formatting.
 String getFileSizeStr(size_t bytes) {
   float kb = bytes / 1024.0;
   if (kb >= 1024.0) {
@@ -140,7 +255,6 @@ String getFileSizeStr(size_t bytes) {
   return String((int)kb) + " KB";
 }
 
-// Purely cosmetic helper: nicer folder titles for the UI.
 String getFolderDisplayName(const char* folderPath) {
   String p = String(folderPath);
   if (p == "/documents") return "Documents";
@@ -150,99 +264,7 @@ String getFolderDisplayName(const char* folderPath) {
   return p;
 }
 
-// Build a simple HTML listing for a given folder, now with delete/rename controls
-String listFolder(const char* folderPath) {
-  String folderPathStr = String(folderPath);
-  String html = "<div class='card'><div class='card-header'>"
-                "<h2>" + getFolderDisplayName(folderPath) + "</h2>"
-                "<span class='card-path'>" + folderPathStr + "</span>"
-                "</div><div class='file-list'>";
-  File dir = SD.open(folderPath);
-  if (!dir || !dir.isDirectory()) {
-    return html + "<div class='empty-state'>Folder not found.</div></div></div>";
-  }
-  File entry = dir.openNextFile();
-  bool any = false;
-  while (entry) {
-    String name = entry.name();
-    if (!entry.isDirectory()) {
-      any = true;
-      String fullPath = folderPathStr + "/" + name;
-      String kind = getFileKind(name);
-      String safePath = escapeForJsAttr(fullPath);
-      String safeName = escapeForJsAttr(name);
-      String nameClickAttr = "";
-      if (kind != "other") {
-        nameClickAttr = " onclick=\"return openPreview(event,'" + safePath + "','" + kind + "');\"";
-      }
-      html += "<div class='file-row'>"
-              "<a class='file-name' href=\"" + fullPath + "\"" + nameClickAttr + "><span class='file-icon'>" + getFileIcon(name) + "</span><span class='file-name-text'>" + name + "</span></a>"
-              "<span class='file-size'>" + getFileSizeStr(entry.size()) + "</span>"
-              "<span class='file-actions'>"
-              "<a class='btn-icon' href=\"" + fullPath + "\" download title='Download'>&#11015;</a>"
-              "<a class='btn-icon' href=\"#\" onclick=\"return pushToDrive('" + safePath + "');\" title='Upload to Drive'>&#9729;</a>"
-              "<a class='btn-icon' href=\"#\" onclick=\"return renameFile('" + safePath + "','" + safeName + "');\" title='Rename'>&#9998;</a>"
-              "<a class='btn-icon btn-danger' href=\"#\" onclick=\"return deleteFile('" + safePath + "','" + safeName + "');\" title='Delete'>&#128465;</a>"
-              "</span>"
-              "</div>";
-    }
-    entry = dir.openNextFile();
-  }
-  if (!any) {
-    html += "<div class='empty-state'>No files yet.</div>";
-  }
-  html += "</div></div>";
-  return html;
-}
-
-// Recursively search all known folders for files whose name contains the query (case-insensitive)
-String searchFiles(const String& query) {
-  String q = query;
-  q.toLowerCase();
-  String html = "<div class='card'><div class='card-header'><h2>Search results for \"" + query + "\"</h2></div><div class='file-list'>";
-  int matches = 0;
-
-  for (int i = 0; i < FOLDER_COUNT; i++) {
-    File dir = SD.open(FOLDERS[i]);
-    if (!dir || !dir.isDirectory()) continue;
-    File entry = dir.openNextFile();
-    while (entry) {
-      if (!entry.isDirectory()) {
-        String name = entry.name();
-        String nameLower = name;
-        nameLower.toLowerCase();
-        if (nameLower.indexOf(q) != -1) {
-          String fullPath = String(FOLDERS[i]) + "/" + name;
-          String kind = getFileKind(name);
-          String safePath = escapeForJsAttr(fullPath);
-          String safeName = escapeForJsAttr(name);
-          String nameClickAttr = "";
-          if (kind != "other") {
-            nameClickAttr = " onclick=\"return openPreview(event,'" + safePath + "','" + kind + "');\"";
-          }
-          html += "<div class='file-row'>"
-                  "<a class='file-name' href=\"" + fullPath + "\"" + nameClickAttr + "><span class='file-icon'>" + getFileIcon(name) + "</span><span class='file-name-text'>" + fullPath + "</span></a>"
-                  "<span class='file-size'>" + getFileSizeStr(entry.size()) + "</span>"
-                  "<span class='file-actions'>"
-                  "<a class='btn-icon' href=\"" + fullPath + "\" download title='Download'>&#11015;</a>"
-                  "<a class='btn-icon btn-danger' href=\"#\" onclick=\"return deleteFile('" + safePath + "','" + safeName + "');\" title='Delete'>&#128465;</a>"
-                  "</span>"
-                  "</div>";
-          matches++;
-        }
-      }
-      entry = dir.openNextFile();
-    }
-  }
-
-  if (matches == 0) {
-    html += "<div class='empty-state'>No files matched.</div>";
-  }
-  html += "</div></div>";
-  return html;
-}
-
-// ================= GOOGLE DRIVE SYNC (UNCHANGED — this part is working, left as-is) =================
+// ================= GOOGLE DRIVE SYNC =================
 
 bool refreshAccessToken() {
   WiFiClientSecure client;
@@ -337,6 +359,10 @@ bool downloadDriveFile(const String& fileId, const String& filename) {
   f.close();
   http.end();
   Serial.println("Downloaded: " + filename + " (" + String(written) + " bytes)");
+  
+  // Add to manifest after successful download
+  appendToManifest(String(SYNCED_FOLDER), filename);
+  
   return true;
 }
 
@@ -363,9 +389,6 @@ bool uploadFileToDrive(const String& localPath) {
 
   String sessionUrl;
 
-  // STEP 1: start the resumable upload session.
-  // Wrapped in { } so client1/http1 are destroyed (freeing their TLS memory)
-  // before we open the second connection for the actual file transfer.
   {
     WiFiClientSecure client1;
     client1.setInsecure();
@@ -395,12 +418,11 @@ bool uploadFileToDrive(const String& localPath) {
       f.close();
       return false;
     }
-  } // client1 + http1 fully freed here
+  }
 
   yield();
-  delay(100); // let memory/network settle before the big transfer
+  delay(100);
 
-  // Parse the session URL into host + path so we can stream manually
   String urlNoProtocol = sessionUrl;
   urlNoProtocol.replace("https://", "");
   int slashIdx = urlNoProtocol.indexOf('/');
@@ -429,7 +451,7 @@ bool uploadFileToDrive(const String& localPath) {
   size_t sent = 0;
   while (sent < fileSize) {
     yield();
-    delay(1); // explicit breathing room every chunk, prevents watchdog trip
+    delay(1);
     size_t toRead = min((size_t)sizeof(buf), fileSize - sent);
     size_t readBytes = f.read(buf, toRead);
     if (readBytes == 0) break;
@@ -438,10 +460,9 @@ bool uploadFileToDrive(const String& localPath) {
   }
   f.close();
 
-  // Read just the status line of the response
   unsigned long waitStart = millis();
   while (client2.connected() && !client2.available()) {
-    if (millis() - waitStart > 15000) break; // 15s timeout waiting for response
+    if (millis() - waitStart > 15000) break;
     yield();
     delay(1);
   }
@@ -459,8 +480,6 @@ bool uploadFileToDrive(const String& localPath) {
   return success;
 }
 
-// Main sync routine — UNCHANGED from your working version, including the
-// "check account" and "list all files" debug steps you want kept as-is.
 String syncWithDrive() {
   if (WiFi.status() != WL_CONNECTED) {
     return "No Wi-Fi connection.";
@@ -472,7 +491,6 @@ String syncWithDrive() {
 
   Serial.println("\n========== ACCESS TOKEN OK ==========\n");
 
-  // STEP 1: Check authenticated account
   {
     WiFiClientSecure client;
     client.setInsecure();
@@ -496,43 +514,8 @@ String syncWithDrive() {
     http.end();
   }
 
-  // STEP 2: List all visible files
-  {
-    WiFiClientSecure client;
-    client.setInsecure();
-
-    HTTPClient http;
-
-    String testUrl =
-      "https://www.googleapis.com/drive/v3/files"
-      "?pageSize=20&fields=files(id,name)";
-
-    http.begin(client, testUrl);
-    http.addHeader("Authorization",
-                   "Bearer " + driveAccessToken);
-    yield();
-    delay(1);
-    int code = http.GET();
-    yield();
-    delay(1);
-    String payload = http.getString();
-    yield();
-    delay(1);
-
-    Serial.println("\n===== ALL DRIVE FILES =====");
-    Serial.println("HTTP Code: " + String(code));
-    Serial.println(payload);
-    yield();
-    delay(1);
-    Serial.println("===========================");
-
-    http.end();
-  }
-
-  // STEP 3: Query sync folder
   WiFiClientSecure client;
   client.setInsecure();
-
   HTTPClient http;
 
   String url =
@@ -573,16 +556,14 @@ String syncWithDrive() {
   }
 
   JsonDocument doc;
-  DeserializationError err =
-      deserializeJson(doc, payload);
+  DeserializationError err = deserializeJson(doc, payload);
 
   if (err) {
     Serial.println(err.c_str());
     return "JSON parse failed.";
   }
 
-  JsonArray files =
-      doc["files"].as<JsonArray>();
+  JsonArray files = doc["files"].as<JsonArray>();
 
   Serial.println(
       "Files found in folder: " +
@@ -591,7 +572,6 @@ String syncWithDrive() {
   int downloaded = 0;
   int uploaded = 0;
 
-  // Download files from Drive
   for (JsonObject file : files) {
     yield();
     delay(1);
@@ -609,44 +589,33 @@ String syncWithDrive() {
     }
   }
 
-  // Upload local files to Drive
-  File dir = SD.open(SYNCED_FOLDER);
+  // Iterate local manifest instead of directory for sync upload check
+  String manifestPath = String(SYNCED_FOLDER) + "/.manifest.txt";
+  File manifestFile = SD.open(manifestPath);
 
-  if (dir) {
-    File entry = dir.openNextFile();
-
-    while (entry) {
+  if (manifestFile) {
+    while (manifestFile.available()) {
       yield();
       delay(1);
-      if (!entry.isDirectory()) {
+      String name = manifestFile.readStringUntil('\n');
+      name.trim();
+      if (name.length() == 0 || name == ".manifest.txt") continue;
 
-        String name = entry.name();
-        bool exists = false;
-
-        for (JsonObject file : files) {
-          if (file["name"].as<String>() == name) {
-            exists = true;
-            break;
-          }
+      bool exists = false;
+      for (JsonObject file : files) {
+        if (file["name"].as<String>() == name) {
+          exists = true;
+          break;
         }
-
-        if (!exists) {
-          entry.close();
-
-          String fullPath =
-            String(SYNCED_FOLDER) + "/" + name;
-
-          if (uploadFileToDrive(fullPath))
-            uploaded++;
-        } else {
-          entry.close();
-        }
-      } else {
-        entry.close();
       }
 
-      entry = dir.openNextFile();
+      if (!exists) {
+        String fullPath = String(SYNCED_FOLDER) + "/" + name;
+        if (uploadFileToDrive(fullPath))
+          uploaded++;
+      }
     }
+    manifestFile.close();
   }
 
   return "Sync complete. Downloaded "
@@ -701,7 +670,6 @@ String getPageStyle() {
     ".upload-row select,.upload-row input[type=file]{padding:9px 12px;border-radius:10px;border:1px solid var(--card-border);background:var(--bg-soft);color:var(--text);font-size:0.88em;}"
     "a.back-link{color:var(--accent);text-decoration:none;font-size:0.9em;}"
     "@media (max-width:600px){.topbar{padding:12px 14px;}.container{padding:14px;}.file-size{display:none;}}"
-    /* --- iOS-style toast with spinner --- */
     "#toast{position:fixed;top:16px;left:50%;transform:translate(-50%,-40px);background:rgba(28,30,38,0.94);color:#fff;"
       "padding:10px 18px;border-radius:20px;font-size:0.85em;display:flex;align-items:center;gap:8px;opacity:0;"
       "pointer-events:none;transition:transform .28s cubic-bezier(.34,1.4,.64,1),opacity .28s ease;z-index:3000;"
@@ -712,7 +680,6 @@ String getPageStyle() {
     "@keyframes spin{to{transform:rotate(360deg);}}"
     ".toast-check{color:#4ade80;font-weight:700;}"
     ".toast-x{color:var(--danger);font-weight:700;}"
-    /* --- In-browser media preview modal --- */
     "#previewOverlay{position:fixed;inset:0;background:rgba(0,0,0,0.8);display:none;align-items:center;justify-content:center;z-index:2500;padding:20px;}"
     "#previewOverlay.show{display:flex;}"
     "#previewBox{background:#0b0e16;border-radius:16px;max-width:92vw;max-height:88vh;overflow:hidden;position:relative;"
@@ -731,9 +698,180 @@ String getPageStyle() {
     "</style>";
 }
 
-// Shared front-end JS for all pages: iOS-style toast/spinner feedback, an in-browser
-// preview modal for audio/video/pdf, and AJAX wrappers for actions so the page never
-// navigates away to a plain confirmation screen.
+//-------------------------------------OLED FUNCTIONS------------------------------------------------------------
+void showCentered(String text, int size = 1)
+{
+  display.clearDisplay();
+  display.setTextSize(size);
+  display.setTextColor(SSD1306_WHITE);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(text,0,0,&x1,&y1,&w,&h);
+
+  display.setCursor((128-w)/2,(64-h)/2);
+  display.println(text);
+  display.display();
+}
+
+// Boot Screen of Oled display
+void showBootScreen()
+{
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(12,18);
+  display.println("Media");
+  display.setCursor(22,42);
+  display.println("Server");
+  display.display();
+}
+
+void showWiFiConnecting()
+{
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(18,20);
+  display.println("Connecting WiFi");
+  display.setCursor(42,40);
+  display.println("...");
+  display.display();
+}
+
+void showIP()
+{
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0,0);
+  display.println("WiFi");
+
+  display.setTextSize(1);
+  display.setCursor(0,30);
+  display.println(WiFi.localIP());
+
+  display.display();
+  delay(5000);   
+}
+
+void showQRCode(String url)
+{
+  display.clearDisplay();
+  QRCode qrcode;
+  uint8_t qrcodeData[qrcode_getBufferSize(3)];
+
+  qrcode_initText(&qrcode,
+                  qrcodeData,
+                  3,
+                  ECC_LOW,
+                  url.c_str());
+
+  for (uint8_t y = 0; y < qrcode.size; y++)
+  {
+    for (uint8_t x = 0; x < qrcode.size; x++)
+    {
+      if(qrcode_getModule(&qrcode,x,y))
+      {
+        display.fillRect(x*2, y*2, 2, 2, SSD1306_WHITE);
+      }
+    }
+  }
+  display.display();
+  delay(5000);
+}
+
+void showDashboard()
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+
+    display.setCursor(0,0);
+    display.println("ROHAN'S NAS");
+
+    display.drawLine(0,10,128,10,WHITE);
+
+    display.setCursor(0,18);
+    display.print("WiFi : ");
+
+    if(WiFi.status()==WL_CONNECTED)
+        display.println(WIFI_SSID);
+    else
+        display.println("DISCONNECTED");
+
+    display.setCursor(0,30);
+    display.print("IP:");
+    display.println(WiFi.localIP());
+
+    display.setCursor(0,44);
+    display.print("SD:");
+    
+    if(SD.cardType() != CARD_NONE)
+        display.println("Ready");
+    else
+        display.println("Missing");
+
+    display.display();
+}
+
+void showStatus(String msg)
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println(msg);  
+    display.display();
+}
+
+void listDocumentsFolder() {
+  Serial.println("===== DOCUMENTS FOLDER =====");
+  File dir = SD.open("/documents");
+  if (!dir) {
+    Serial.println("Cannot open /documents");
+    return;
+  }
+  File file;
+  while ((file = dir.openNextFile())) {
+    Serial.print(file.name());
+    Serial.print("   ");
+    Serial.println(file.size());
+    file.close();
+  }
+  dir.close();
+  Serial.println("===========================");
+}
+
+void listAllFiles(const char *dirname) {
+  File dir = SD.open(dirname);
+  if (!dir) {
+    Serial.print("Cannot open: ");
+    Serial.println(dirname);
+    return;
+  }
+  File file;
+  while (true) {
+    file = dir.openNextFile();
+    if (!file) break;
+    if (file.isDirectory()) {
+      Serial.print("[DIR] ");
+      Serial.println(file.name());
+      String next = String(dirname);
+      if (next != "/") next += "/";
+      next += file.name();
+      file.close();
+      listAllFiles(next.c_str());
+    } else {
+      Serial.print("[FILE] ");
+      Serial.print(dirname);
+      Serial.print("/");
+      Serial.print(file.name());
+      Serial.print("   ");
+      Serial.println(file.size());
+      file.close();
+    }
+  }
+  dir.close();
+}
+
 String getPageScript() {
   return
     "<div id='toast'></div>"
@@ -761,7 +899,8 @@ String getPageScript() {
       "var freshPath=path+(path.indexOf('?')===-1?'?':'&')+'t='+Date.now();"
       "if(kind==='image'){content.innerHTML='<img src=\"'+freshPath+'\" alt=\"preview\">';}"
       "else if(kind==='video'){var vmime=guessMime(path);"
-        "content.innerHTML='<video controls preload=\"metadata\" playsinline><source src=\"'+freshPath+'\"'+(vmime?' type=\"'+vmime+'\"':'')+'>Your browser can not play this video.</video>';"
+        "var vUrl='/mediaStream?path='+encodeURIComponent(path)+'&key='+PREVIEW_KEY+'&t='+Date.now();"
+        "content.innerHTML='<video controls preload=\"metadata\" playsinline><source src=\"'+vUrl+'\"'+(vmime?' type=\"'+vmime+'\"':'')+'>Your browser can not play this video.</video>';"
         "var v=content.querySelector('video');"
         "v.addEventListener('loadedmetadata',function(){v.play().catch(function(){});});"
         "v.addEventListener('error',function(){toastDone('Playback failed - try downloading instead',false);});}"
@@ -815,58 +954,215 @@ String getPageScript() {
     "</script>";
 }
 
-String buildHomePage() {
-  String html = "<html><head><title>Home Media Server</title>"
-                 "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += getPageStyle();
-  html += "</head><body>";
+// Builds one file row's HTML. Uses name and size directly to support manifest reading.
+String buildFileRowHtml(const String& folderPathStr, const String& name, size_t size) {
+  String fullPath = folderPathStr + "/" + name;
+  String kind = getFileKind(name);
+  String safePath = escapeForJsAttr(fullPath);
+  String safeName = escapeForJsAttr(name);
+  String hrefPath = htmlEscape(fullPath);
+  String displayName = htmlEscape(name);
+  
+  String nameClickAttr = "";
+  if (kind != "other") {
+    nameClickAttr = " onclick=\"return openPreview(event,'" + safePath + "','" + kind + "');\"";
+  }
+  
+  return "<div class='file-row'>"
+         "<a class='file-name' href=\"" + hrefPath + "\"" + nameClickAttr + ">"
+         "<span class='file-icon'>" + getFileIcon(name) + "</span>"
+         "<span class='file-name-text'>" + displayName + "</span></a>"
+         "<span class='file-size'>" + getFileSizeStr(size) + "</span>"
+         "<span class='file-actions'>"
+         "<a class='btn-icon' href=\"" + hrefPath + "\" download title='Download'>&#11015;</a>"
+         "<a class='btn-icon' href=\"#\" onclick=\"return pushToDrive('" + safePath + "');\" title='Upload to Drive'>&#9729;</a>"
+         "<a class='btn-icon' href=\"#\" onclick=\"return renameFile('" + safePath + "','" + safeName + "');\" title='Rename'>&#9998;</a>"
+         "<a class='btn-icon btn-danger' href=\"#\" onclick=\"return deleteFile('" + safePath + "','" + safeName + "');\" title='Delete'>&#128465;</a>"
+         "</span></div>";
+}
 
-  html += "<div class='topbar'>"
-          "<h1>&#128187; Home Media Server</h1>"
-          "<div class='actions'>"
-          "<button class='btn btn-secondary' onclick='runSync()'>&#9729; Sync with Drive</button>"
-          "<button class='btn btn-secondary' onclick='runRemount()'>&#128260; Remount SD</button>"
-          "<button class='btn btn-secondary' onclick='refreshListings()'>&#8635; Refresh</button>"
-          "</div>"
-          "</div>";
 
-  html += "<div class='container'>";
+// State machine using manifestFile instead of SD directory enumeration
+String genHomeNext(PageGenState* st) {
+  if (st->step == 0) {
+    st->step = 1;
+    String s = "<html><head><title>Home Media Server</title>"
+               "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    s += getPageStyle();
+    s += "</head><body>";
+    s += "<div class='topbar'>"
+         "<h1>&#128187; Home Media Server</h1>"
+         "<div class='actions'>"
+         "<button class='btn btn-secondary' onclick='runSync()'>&#9729; Sync with Drive</button>"
+         "<button class='btn btn-secondary' onclick='runRemount()'>&#128260; Remount SD</button>"
+         "<button class='btn btn-secondary' onclick='refreshListings()'>&#8635; Refresh</button>"
+         "</div></div>";
+    s += "<div class='container'>";
+    s += "<form class='search-form' method='GET' action='/search'>"
+         "<input type='text' name='q' placeholder='Search files across all folders...'>"
+         "<button type='submit'>Search</button></form>";
+    s += "<div class='grid'>";
+    return s;
+  }
 
-  html += "<form class='search-form' method='GET' action='/search'>"
-          "<input type='text' name='q' placeholder='Search files across all folders...'>"
-          "<button type='submit'>Search</button>"
-          "</form>";
+  if (st->step == 1) {
+    const char* path = FOLDERS[st->folderIdx];
+    
+    // Open the manifest file instead of the directory
+    if (!st->folderOpened) {
+      String manifestPath = String(path) + "/.manifest.txt";
+      st->manifestFile = SD.open(manifestPath);
+      st->folderOpened = true;
+      st->folderAny = false;
+      return "<div class='card'><div class='card-header'>"
+             "<h2>" + getFolderDisplayName(path) + "</h2>"
+             "<span class='card-path'>" + String(path) + "</span>"
+             "</div><div class='file-list'>";
+    }
 
-  html += "<div class='grid'>";
-  html += listFolder("/documents");
-  html += listFolder("/media/audio");
-  html += listFolder("/media/video");
-  html += listFolder("/synced");
-  html += "</div>";
+    // Pull entries from the manifest text
+    while (st->manifestFile && st->manifestFile.available()) {
+      String name = st->manifestFile.readStringUntil('\n');
+      name.trim();
+      
+      // Skip empty lines or the manifest itself
+      if (name.length() == 0 || name == ".manifest.txt") continue;
 
-  html += "<div class='panel'>"
-          "<h3>&#11014; Upload a file</h3>"
-          "<form id='uploadForm' class='upload-row' onsubmit='return submitUpload(event);'>"
-          "<select name='folder'>"
-          "<option value='/documents'>Documents</option>"
-          "<option value='/media/audio'>Music</option>"
-          "<option value='/media/video'>Video</option>"
-          "</select>"
-          "<input type='file' name='file'>"
-          "<button type='submit'>Upload</button>"
-          "</form>"
-          "</div>";
+      String fullPath = String(path) + "/" + name;
+      
+      // Direct-path lookup for the actual file
+      File entry = SD.open(fullPath);
+      if (entry && !entry.isDirectory()) {
+        st->folderAny = true;
+        size_t fileSize = entry.size();
+        entry.close(); // Close immediately to save handles
+        return buildFileRowHtml(String(path), name, fileSize);
+      }
+      if (entry) entry.close(); // Close if it was a directory or phantom entry
+    }
 
-  html += "</div>";
-  html += getPageScript();
-  html += "</body></html>";
-  return html;
+    // Manifest exhausted — close it out and move to the next folder
+    if (st->manifestFile) st->manifestFile.close();
+    String s = st->folderAny ? "" : "<div class='empty-state'>No files yet.</div>";
+    s += "</div></div>"; // close file-list, card
+    st->folderOpened = false;
+    st->folderIdx++;
+    if (st->folderIdx >= FOLDER_COUNT) {
+      st->step = 2;
+    }
+    return s;
+  }
+
+  if (st->step == 2) {
+    st->step = 3;
+    String s = "</div>"; // close grid
+    s += "<div class='panel'>"
+         "<h3>&#11014; Upload a file</h3>"
+         "<form id='uploadForm' class='upload-row' onsubmit='return submitUpload(event);'>"
+         "<select name='folder'>"
+         "<option value='/documents'>Documents</option>"
+         "<option value='/media/audio'>Music</option>"
+         "<option value='/media/video'>Video</option>"
+         "</select>"
+         "<input type='file' name='file'>"
+         "<button type='submit'>Upload</button>"
+         "</form></div>";
+    s += "</div>"; // close container
+    s += getPageScript();
+    s += "</body></html>";
+    return s;
+  }
+
+  return ""; // step == 3: truly finished
+}
+
+// Searches via manifest instead of directory enumeration
+void streamSearchResults(AsyncResponseStream* out, const String& query) {
+  String q = query;
+  q.toLowerCase();
+  out->print("<div class='card'><div class='card-header'><h2>Search results for \"" + htmlEscape(query) + "\"</h2></div><div class='file-list'>");
+  int matches = 0;
+
+  for (int i = 0; i < FOLDER_COUNT; i++) {
+    String manifestPath = String(FOLDERS[i]) + "/.manifest.txt";
+    File manifestFile = SD.open(manifestPath);
+    if (!manifestFile) continue;
+
+    while (manifestFile.available()) {
+      String name = manifestFile.readStringUntil('\n');
+      name.trim();
+      if (name.length() == 0 || name == ".manifest.txt") continue;
+
+      String nameLower = name;
+      nameLower.toLowerCase();
+      
+      if (nameLower.indexOf(q) != -1) {
+        String fullPath = String(FOLDERS[i]) + "/" + name;
+        File entry = SD.open(fullPath);
+        if (entry && !entry.isDirectory()) {
+          
+          String kind = getFileKind(name);
+          String safePath = escapeForJsAttr(fullPath);
+          String safeName = escapeForJsAttr(name);
+          String hrefPath = htmlEscape(fullPath);
+          String displayPath = htmlEscape(fullPath);
+          
+          String nameClickAttr = "";
+          if (kind != "other") {
+            nameClickAttr = " onclick=\"return openPreview(event,'" + safePath + "','" + kind + "');\"";
+          }
+          
+          out->print("<div class='file-row'>"
+                  "<a class='file-name' href=\"" + hrefPath + "\"" + nameClickAttr + "><span class='file-icon'>" + getFileIcon(name) + "</span><span class='file-name-text'>" + displayPath + "</span></a>"
+                  "<span class='file-size'>" + getFileSizeStr(entry.size()) + "</span>"
+                  "<span class='file-actions'>"
+                  "<a class='btn-icon' href=\"" + hrefPath + "\" download title='Download'>&#11015;</a>"
+                  "<a class='btn-icon btn-danger' href=\"#\" onclick=\"return deleteFile('" + safePath + "','" + safeName + "');\" title='Delete'>&#128465;</a>"
+                  "</span>"
+                  "</div>");
+          matches++;
+        }
+        if (entry) entry.close();
+      }
+      yield();
+    }
+    manifestFile.close();
+  }
+
+  if (matches == 0) {
+    out->print("<div class='empty-state'>No files matched.</div>");
+  }
+  out->print("</div></div>");
+}
+
+void debugListFolder(File dir, String indent, String& out) {
+  File entry = dir.openNextFile();
+  while (entry) {
+    String name = entry.name();
+    String line = indent + "- \"" + name + "\" (" + String(name.length()) + " chars, " +
+                  String(entry.size()) + " bytes)" + (entry.isDirectory() ? " [DIR]" : "");
+    Serial.println(line);
+    out += line + "\n";
+    if (entry.isDirectory()) {
+      File sub = SD.open(entry.path());
+      debugListFolder(sub, indent + "  ", out);
+      sub.close();
+    }
+    entry.close();
+    entry = dir.openNextFile();
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-
+  
+  Wire.begin(OLED_SDA, OLED_SCL);
+  display.begin(SSD1306_SWITCHCAPVCC,0x3C);
+  display.clearDisplay();
+  showBootScreen();
+  delay(1500);
+  
   // --- SD card init ---
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
   if (!SD.begin(SD_CS_PIN)) {
@@ -875,7 +1171,9 @@ void setup() {
     Serial.println("SD card mounted.");
     ensureFolders();
   }
-
+  
+  showWiFiConnecting();
+  
   // --- Wi-Fi Station mode ---
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -887,18 +1185,60 @@ void setup() {
   Serial.println();
   Serial.print("Connected! IP address: ");
   Serial.println(WiFi.localIP());
+  
+  Serial.println("Showing IP");
+  showIP();
+  delay(2000);
+
+  Serial.println("Showing WR Code");
+  showQRCode(ngrokURL);
+
+  Serial.println("Showing Dashboard");
+  showDashboard();
+  delay(2000);
 
   // --- mDNS so you can use http://mediaserver.local instead of typing the IP ---
   if (MDNS.begin(HOSTNAME)) {
     Serial.println("mDNS started: http://" + String(HOSTNAME) + ".local");
   }
 
+  // --- Avoid the browser silently firing repeated authenticated requests for a favicon ---
+  server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(204);
+  });
+
   // --- Home page: lists all files (auth required) ---
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) {
       return request->requestAuthentication();
     }
-    request->send(200, "text/html", buildHomePage());
+    Serial.print("Free heap before home page: ");
+    Serial.println(ESP.getFreeHeap());
+
+    auto state = std::make_shared<PageGenState>();
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "text/html",
+      [state](uint8_t *buffer, size_t maxLen, size_t /*index*/) -> size_t {
+        size_t written = 0;
+        while (written < maxLen) {
+          if (state->pending.length() == 0) {
+            if (state->step >= 3) break; // truly done
+            state->pending = genHomeNext(state.get());
+            if (state->pending.length() == 0 && state->step < 3) {
+              continue; // that step produced no text (e.g. skipped dir) — try the next one
+            }
+          }
+          size_t toCopy = maxLen - written;
+          if (toCopy > (size_t)state->pending.length()) toCopy = state->pending.length();
+          memcpy(buffer + written, state->pending.c_str(), toCopy);
+          written += toCopy;
+          state->pending.remove(0, toCopy);
+        }
+        return written;
+      });
+    request->send(response);
+    Serial.print("Free heap after starting home page: ");
+    Serial.println(ESP.getFreeHeap());
   });
   // --- Streams audio/video for in-browser preview, authenticated via key or Basic Auth ---
   server.on("/mediaStream", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -978,8 +1318,13 @@ void setup() {
       return;
     }
     String path = request->getParam("path")->value();
+    int slash = path.lastIndexOf('/');
+    String folder = (slash != -1) ? path.substring(0, slash) : "";
+    String filename = (slash != -1) ? path.substring(slash + 1) : path;
+    
     String html;
     if (SD.remove(path)) {
+      removeFromManifest(folder, filename);
       html = "<p>Deleted " + path + "</p>";
     } else {
       html = "<p>Failed to delete " + path + " (file may not exist).</p>";
@@ -1002,10 +1347,12 @@ void setup() {
 
     int slash = path.lastIndexOf('/');
     String folder = (slash != -1) ? path.substring(0, slash) : "";
+    String oldName = (slash != -1) ? path.substring(slash + 1) : path;
     String newPath = folder + "/" + newName;
 
     String html;
     if (SD.rename(path, newPath)) {
+      renameInManifest(folder, oldName, newName);
       html = "<p>Renamed to " + newPath + "</p>";
     } else {
       html = "<p>Rename failed. Check the new name doesn't already exist.</p>";
@@ -1020,18 +1367,42 @@ void setup() {
       return request->requestAuthentication();
     }
     String q = request->hasParam("q") ? request->getParam("q")->value() : "";
-    String html = "<html><head><title>Search</title>"
-                   "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-    html += getPageStyle();
-    html += "</head><body>"
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<html><head><title>Search</title>"
+                   "<meta name='viewport' content='width=device-width, initial-scale=1'>");
+    response->print(getPageStyle());
+    response->print("</head><body>"
             "<div class='topbar'><h1>&#128269; Search</h1>"
             "<div class='actions'><a class='btn btn-secondary' href='/'>&larr; Back to files</a></div></div>"
-            "<div class='container'>";
-    html += searchFiles(q);
-    html += "</div>";
-    html += getPageScript();
-    html += "</body></html>";
-    request->send(200, "text/html", html);
+            "<div class='container'>");
+    streamSearchResults(response, q);
+    response->print("</div>");
+    response->print(getPageScript());
+    response->print("</body></html>");
+    request->send(response);
+  });
+
+  // --- Diagnostic: print raw SD contents to Serial + browser. Read-only, no side effects. ---
+  server.on("/debugListSD", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) {
+      return request->requestAuthentication();
+    }
+    Serial.println("\n===== DEBUG: RAW SD CARD CONTENTS =====");
+    String out = "Raw SD card contents:\n\n";
+    for (int i = 0; i < FOLDER_COUNT; i++) {
+      Serial.println(FOLDERS[i] + String(":"));
+      out += String(FOLDERS[i]) + ":\n";
+      File dir = SD.open(FOLDERS[i]);
+      if (dir && dir.isDirectory()) {
+        debugListFolder(dir, "  ", out);
+        dir.close();
+      } else {
+        Serial.println("  (could not open folder)");
+        out += "  (could not open folder)\n";
+      }
+    }
+    Serial.println("========================================");
+    request->send(200, "text/plain", out);
   });
 
   // --- Upload handler (auth required) ---
@@ -1050,12 +1421,22 @@ void setup() {
       static String targetFolder = "/documents";
 
       if (index == 0) {
+        Serial.print("Filename received: [");
+        Serial.print(filename);
+        Serial.println("]");
+    
+        showStatus("Uploading...\n" + filename);
+    
         if (request->hasParam("folder", true)) {
           targetFolder = request->getParam("folder", true)->value();
         }
+    
         String path = targetFolder + "/" + filename;
-        Serial.println("Upload start: " + path);
+        SD.remove(path);
+        
         uploadFile = SD.open(path, FILE_WRITE);
+    
+        Serial.println("Upload start: " + path);
       }
       if (uploadFile) {
         uploadFile.write(data, len);
@@ -1063,6 +1444,30 @@ void setup() {
       if (final) {
         if (uploadFile) uploadFile.close();
         Serial.println("Upload finished: " + filename);
+        String fullPath = targetFolder + "/" + filename;
+
+        File verify = SD.open(fullPath);
+    
+        if (verify) {
+            Serial.println("===== VERIFY SUCCESS =====");
+            Serial.print("Name: ");
+            Serial.println(verify.name());
+            Serial.print("Size: ");
+            Serial.println(verify.size());
+            verify.close();
+
+            // ADD TO MANIFEST AFTER VERIFYING SUCCESSFUL UPLOAD
+            appendToManifest(targetFolder, filename);
+
+            Serial.println("\n===== COMPLETE SD CARD =====");
+            listAllFiles("/");
+            Serial.println("============================");
+        } else {
+            Serial.println("===== VERIFY FAILED =====");
+        }
+        showStatus("Upload Complete\n" + filename);
+        delay(1500);
+        showDashboard();
       }
     });
 
@@ -1078,7 +1483,11 @@ void loop() {
         Serial.println("================================");
         Serial.println("Starting Google Drive Sync...");
         Serial.println("================================");
+        showStatus("Syncing Drive...");
         lastSyncResult = syncWithDrive();
+        showStatus("Sync Complete");
+        delay(1500);
+        showDashboard();
         Serial.println();
         Serial.println("================================");
         Serial.println(lastSyncResult);
@@ -1096,11 +1505,27 @@ void loop() {
           lastPushResult = "No Wi-Fi connection.";
         } else if (!refreshAccessToken()) {
           lastPushResult = "Failed to get Drive access token.";
-        } else if (uploadFileToDrive(pushPath)) {
-          lastPushResult = "Uploaded " + pushPath + " successfully.";
         } else {
-          lastPushResult = "Upload failed for " + pushPath + ".";
-        }
+
+                  showStatus("Uploading...");
+              
+                  if (uploadFileToDrive(pushPath)) {
+              
+                      lastPushResult = "Uploaded " + pushPath + " successfully.";
+              
+                      showStatus("Upload Done");
+                      delay(1500);
+              
+                  } else {
+              
+                      lastPushResult = "Upload failed for " + pushPath + ".";
+              
+                      showStatus("Upload Failed");
+                      delay(1500);
+                  }
+              
+                  showDashboard();
+              }
 
         Serial.println();
         Serial.println("================================");

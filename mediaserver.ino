@@ -31,8 +31,8 @@ String lastPushResult = "No push performed yet.";
 
 // ---------- CONFIG: EDIT THESE ----------
 //NOTE:Frequency of WIFI should be at 2.4GHz
-const char* WIFI_SSID     = "Redmi 12 5G";
-const char* WIFI_PASSWORD = "123456789";
+const char* WIFI_SSID     = "";
+const char* WIFI_PASSWORD = "";
 const char* PREVIEW_KEY = "nasPreviewKey987" ;
 const char* HOSTNAME      = "mediaserver";   
 
@@ -57,10 +57,10 @@ const char* AUTH_USERNAME = "Admin";
 const char* AUTH_PASSWORD = "rohan123";
 
 // Google Drive — from get_refres_token.py output. Treat as secrets: don't share/commit.
-const char* DRIVE_CLIENT_ID     ="791272166374-b9fusoesvns0kl2uj3fvt3g38op7vicf.apps.googleusercontent.com";
-const char* DRIVE_CLIENT_SECRET ="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";
-const char* DRIVE_REFRESH_TOKEN ="1//0g_Su_AynAq1_CgYIARAAGBASNwF-L9Irw2tvSJS98-VGQ1eANvo47AbpdfaVJ187sCf-x0M_wjwt2OwsMlCFZjHBzESUyEfLprY";
-const char* DRIVE_FOLDER_ID     ="1mTjQBYJD1DFc3kTTAXq3iaFaaMbVkaAZ";
+const char* DRIVE_CLIENT_ID     ="";
+const char* DRIVE_CLIENT_SECRET ="";
+const char* DRIVE_REFRESH_TOKEN ="";
+const char* DRIVE_FOLDER_ID     ="";
 // -----------------------------------------
 
 AsyncWebServer server(80);

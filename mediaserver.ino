@@ -31,8 +31,8 @@ String lastPushResult = "No push performed yet.";
 
 // ---------- CONFIG: EDIT THESE ----------
 //NOTE:Frequency of WIFI should be at 2.4GHz
-const char* WIFI_SSID     = "";
-const char* WIFI_PASSWORD = "";
+const char* WIFI_SSID     = "Redmi 12 5G";
+const char* WIFI_PASSWORD = "123456789";
 const char* PREVIEW_KEY = "nasPreviewKey987" ;
 const char* HOSTNAME      = "mediaserver";   
 
@@ -49,17 +49,17 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define OLED_SDA 21
 #define OLED_SCL 22
 
-String ngrokURL = "";
+String ngrokURL = "https://sympathy-deafness-borough.ngrok-free.dev";
 
 // Authentication — change these before flashing!
 const char* AUTH_USERNAME = "Admin";
 const char* AUTH_PASSWORD = "rohan123";
 
 // Google Drive — from get_refres_token.py output. Treat as secrets: don't share/commit.
-const char* DRIVE_CLIENT_ID     ="";
-const char* DRIVE_CLIENT_SECRET ="";
-const char* DRIVE_REFRESH_TOKEN ="";
-const char* DRIVE_FOLDER_ID     ="";
+const char* DRIVE_CLIENT_ID     ="791272166374-b9fusoesvns0kl2uj3fvt3g38op7vicf.apps.googleusercontent.com";
+const char* DRIVE_CLIENT_SECRET ="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";
+const char* DRIVE_REFRESH_TOKEN ="1//0g_Su_AynAq1_CgYIARAAGBASNwF-L9Irw2tvSJS98-VGQ1eANvo47AbpdfaVJ187sCf-x0M_wjwt2OwsMlCFZjHBzESUyEfLprY";
+const char* DRIVE_FOLDER_ID     ="1mTjQBYJD1DFc3kTTAXq3iaFaaMbVkaAZ";
 // -----------------------------------------
 
 AsyncWebServer server(80);
@@ -261,16 +261,31 @@ String htmlEscape(const String& s) {
 String getMimeForPath(const String& path) {
   String p = path;
   p.toLowerCase();
+  
+  // Documents & Images
+  if (p.endsWith(".pdf")) return "application/pdf";
+  if (p.endsWith(".txt")) return "text/plain";
+  if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
+  if (p.endsWith(".png")) return "image/png";
+  if (p.endsWith(".gif")) return "image/gif";
+  if (p.endsWith(".webp")) return "image/webp";
+  if (p.endsWith(".html") || p.endsWith(".htm")) return "text/html";
+  if (p.endsWith(".css")) return "text/css";
+  
+  // Audio
   if (p.endsWith(".mp3")) return "audio/mpeg";
   if (p.endsWith(".wav")) return "audio/wav";
   if (p.endsWith(".flac")) return "audio/flac";
   if (p.endsWith(".m4a")) return "audio/mp4";
   if (p.endsWith(".aac")) return "audio/aac";
   if (p.endsWith(".ogg")) return "audio/ogg";
+  
+  // Video
   if (p.endsWith(".mp4")) return "video/mp4";
   if (p.endsWith(".mkv")) return "video/x-matroska";
   if (p.endsWith(".webm")) return "video/webm";
   if (p.endsWith(".mov")) return "video/quicktime";
+  
   return "application/octet-stream";
 }
 

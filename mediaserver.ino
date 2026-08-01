@@ -11,6 +11,7 @@
 #include <Adafruit_SSD1306.h>
 #include <rickmoo_qrcode.h>
 #include <memory>
+#include <vector>
 
 struct PageGenState {
   int step = 0;            // 0=head/topbar/grid-open, 1=folder loop, 2=tail, 3=done
@@ -21,7 +22,6 @@ struct PageGenState {
   String pending;          // leftover text not yet flushed into the network buffer
 };
 
-
 volatile bool syncRequested = false;
 String lastSyncResult = "No sync performed yet.";
 
@@ -31,11 +31,10 @@ String lastPushResult = "No push performed yet.";
 
 // ---------- CONFIG: EDIT THESE ----------
 //NOTE:Frequency of WIFI should be at 2.4GHz
-const char* WIFI_SSID     = "";
-const char* WIFI_PASSWORD = "";
+const char* WIFI_SSID     = "Redmi 12 5G";
+const char* WIFI_PASSWORD = "123456789";
 const char* PREVIEW_KEY = "nasPreviewKey987" ;
 const char* HOSTNAME      = "mediaserver";   
-
 
 #define SD_CS_PIN   5
 #define SD_MOSI_PIN 23
@@ -57,25 +56,55 @@ const char* AUTH_USERNAME = "Admin";
 const char* AUTH_PASSWORD = "rohan123";
 
 // Google Drive — from get_refres_token.py output. Treat as secrets: don't share/commit.
-const char* DRIVE_CLIENT_ID     ="";
-const char* DRIVE_CLIENT_SECRET ="";
-const char* DRIVE_REFRESH_TOKEN ="";
-const char* DRIVE_FOLDER_ID     ="";
+const char* DRIVE_CLIENT_ID     ="791272166374-b9fusoesvns0kl2uj3fvt3g38op7vicf.apps.googleusercontent.com";
+const char* DRIVE_CLIENT_SECRET ="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";
+const char* DRIVE_REFRESH_TOKEN ="1//0g_Su_AynAq1_CgYIARAAGBASNwF-L9Irw2tvSJS98-VGQ1eANvo47AbpdfaVJ187sCf-x0M_wjwt2OwsMlCFZjHBzESUyEfLprY";
+const char* DRIVE_FOLDER_ID     ="1mTjQBYJD1DFc3kTTAXq3iaFaaMbVkaAZ";
 // -----------------------------------------
 
 AsyncWebServer server(80);
 String driveAccessToken = "";
 const char* SYNCED_FOLDER = "/synced";
 
-// Folders we expect on the SD card
-const char* FOLDERS[] = { "/documents", "/media/audio", "/media/video", "/synced" };
-const int FOLDER_COUNT = 4;
+// Dynamic Folder Management
+std::vector<String> activeFolders;
+
+void saveFolderManifest() {
+  File f = SD.open("/.folders.txt", FILE_WRITE);
+  if (f) {
+    for (String folder : activeFolders) {
+      f.println(folder);
+    }
+    f.close();
+  }
+}
+
+void loadFolderManifest() {
+  activeFolders.clear();
+  File f = SD.open("/.folders.txt", FILE_READ);
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 0) activeFolders.push_back(line);
+    }
+    f.close();
+  }
+  // Ensure base folders exist if manifest is missing/empty
+  if (activeFolders.empty()) {
+    activeFolders.push_back("/documents");
+    activeFolders.push_back("/media/audio");
+    activeFolders.push_back("/media/video");
+    activeFolders.push_back("/synced");
+    saveFolderManifest();
+  }
+}
 
 void ensureFolders() {
-  for (int i = 0; i < FOLDER_COUNT; i++) {
-    if (!SD.exists(FOLDERS[i])) {
+  for (size_t i = 0; i < activeFolders.size(); i++) {
+    if (!SD.exists(activeFolders[i])) {
       // Create nested folders one level at a time
-      String path = FOLDERS[i];
+      String path = activeFolders[i];
       int idx = 1;
       while (idx > 0) {
         idx = path.indexOf('/', idx);
@@ -95,6 +124,7 @@ bool remountSD() {
   delay(300); // give the card a moment to settle
   bool ok = SD.begin(SD_CS_PIN);
   if (ok) {
+    loadFolderManifest();
     ensureFolders();
     Serial.println("SD card remounted successfully.");
   } else {
@@ -105,7 +135,6 @@ bool remountSD() {
 
 // ================= MANIFEST HELPER FUNCTIONS =================
 
-// Ensures we don't add duplicate filenames if overwriting an existing file
 void appendToManifest(const String& folder, const String& filename) {
   String manifestPath = folder + "/.manifest.txt";
   bool existsInManifest = false;
@@ -132,7 +161,6 @@ void appendToManifest(const String& folder, const String& filename) {
   }
 }
 
-// Rewrites the manifest excluding the deleted file
 void removeFromManifest(const String& folder, const String& filename) {
   String manifestPath = folder + "/.manifest.txt";
   String tempPath = folder + "/.manifest_tmp.txt";
@@ -155,7 +183,6 @@ void removeFromManifest(const String& folder, const String& filename) {
   }
 }
 
-// Rewrites the manifest substituting the old name for the new one
 void renameInManifest(const String& folder, const String& oldName, const String& newName) {
   String manifestPath = folder + "/.manifest.txt";
   String tempPath = folder + "/.manifest_tmp.txt";
@@ -255,13 +282,19 @@ String getFileSizeStr(size_t bytes) {
   return String((int)kb) + " KB";
 }
 
-String getFolderDisplayName(const char* folderPath) {
-  String p = String(folderPath);
-  if (p == "/documents") return "Documents";
-  if (p == "/media/audio") return "Music";
-  if (p == "/media/video") return "Videos";
-  if (p == "/synced") return "Synced (Drive)";
-  return p;
+String getFolderDisplayName(const String& folderPath) {
+  if (folderPath == "/documents") return "Documents";
+  if (folderPath == "/media/audio") return "Music";
+  if (folderPath == "/media/video") return "Videos";
+  if (folderPath == "/synced") return "Synced (Drive)";
+  
+  // For custom folders, show the capitalized base name
+  String name = folderPath;
+  int lastSlash = name.lastIndexOf('/');
+  if (lastSlash != -1 && lastSlash < name.length() - 1) {
+    name = name.substring(lastSlash + 1);
+  }
+  return name;
 }
 
 // ================= GOOGLE DRIVE SYNC =================
@@ -360,7 +393,6 @@ bool downloadDriveFile(const String& fileId, const String& filename) {
   http.end();
   Serial.println("Downloaded: " + filename + " (" + String(written) + " bytes)");
   
-  // Add to manifest after successful download
   appendToManifest(String(SYNCED_FOLDER), filename);
   
   return true;
@@ -667,7 +699,8 @@ String getPageStyle() {
     ".panel{background:var(--card);border:1px solid var(--card-border);border-radius:var(--radius);padding:18px 20px;margin-bottom:16px;}"
     ".panel h3{margin:0 0 12px 0;font-size:0.95em;}"
     ".upload-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}"
-    ".upload-row select,.upload-row input[type=file]{padding:9px 12px;border-radius:10px;border:1px solid var(--card-border);background:var(--bg-soft);color:var(--text);font-size:0.88em;}"
+    ".upload-row select,.upload-row input[type=file], .upload-row input[type=text] {padding:9px 12px;border-radius:10px;border:1px solid var(--card-border);background:var(--bg-soft);color:var(--text);font-size:0.88em;}"
+    ".upload-row input[type=text] {flex:1; min-width:200px;}"
     "a.back-link{color:var(--accent);text-decoration:none;font-size:0.9em;}"
     "@media (max-width:600px){.topbar{padding:12px 14px;}.container{padding:14px;}.file-size{display:none;}}"
     "#toast{position:fixed;top:16px;left:50%;transform:translate(-50%,-40px);background:rgba(28,30,38,0.94);color:#fff;"
@@ -695,6 +728,12 @@ String getPageStyle() {
     "#previewClose{position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.15);"
       "color:#fff;border:none;font-size:1.1em;cursor:pointer;z-index:1;}"
     "#previewClose:hover{background:rgba(255,255,255,0.28);}"
+    "#moveModalOverlay{position:fixed;inset:0;background:rgba(0,0,0,0.8);display:none;align-items:center;justify-content:center;z-index:2600;padding:20px;}"
+    "#moveModalOverlay.show{display:flex;}"
+    "#moveModal{background:var(--card);border:1px solid var(--card-border);border-radius:var(--radius);padding:20px;width:100%;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,0.5);}"
+    "#moveModal h3{margin-top:0;margin-bottom:10px;font-size:1.1em;}"
+    "#moveModal select{width:100%;padding:10px;margin:15px 0;border-radius:10px;background:var(--bg-soft);color:var(--text);border:1px solid var(--card-border);font-size:1em;}"
+    ".modal-actions{display:flex;justify-content:flex-end;gap:10px;}"
     "</style>";
 }
 
@@ -883,8 +922,11 @@ String getPageScript() {
     "function toastDone(msg,ok){if(ok===undefined)ok=true;setToast(ok?'<span class=\"toast-check\">&#10003;</span>':'<span class=\"toast-x\">&#10005;</span>',msg);hideToastDelayed();}"
     "function hideToastDelayed(delay){clearTimeout(window.__toastTimer);window.__toastTimer=setTimeout(function(){document.getElementById('toast').classList.remove('show');},delay||1500);}"
     "function refreshListings(){fetch('/',{credentials:'same-origin'}).then(function(r){return r.text();}).then(function(html){"
-      "var doc=new DOMParser().parseFromString(html,'text/html');var ng=doc.querySelector('.grid');var cg=document.querySelector('.grid');"
-      "if(ng&&cg){cg.innerHTML=ng.innerHTML;}}).catch(function(){});}"
+      "var doc=new DOMParser().parseFromString(html,'text/html');"
+      "var ng=doc.querySelector('.grid');var cg=document.querySelector('.grid');if(ng&&cg){cg.innerHTML=ng.innerHTML;}"
+      "var ns=doc.querySelector('select[name=\"folder\"]');var cs=document.querySelector('select[name=\"folder\"]');if(ns&&cs){cs.innerHTML=ns.innerHTML;}"
+      "var nmd=doc.getElementById('moveDest');var cmd=document.getElementById('moveDest');if(nmd&&cmd){cmd.innerHTML=nmd.innerHTML;}"
+      "}).catch(function(){});}"
     "function guessMime(path){var ext=path.split('.').pop().toLowerCase();var map={mp4:'video/mp4',mkv:'video/x-matroska',"
       "webm:'video/webm',mov:'video/quicktime',mp3:'audio/mpeg',wav:'audio/wav',flac:'audio/flac',m4a:'audio/mp4',aac:'audio/aac',ogg:'audio/ogg'};"
       "return map[ext]||'';}"
@@ -942,6 +984,12 @@ String getPageScript() {
       ".then(function(r){return r.text();}).then(function(txt){var ok=txt.indexOf('Renamed to')!==-1;"
       "toastDone(ok?'Renamed':'Rename failed',ok);refreshListings();})"
       ".catch(function(){toastDone('Rename request failed',false);});return false;}"
+    
+    "var currentMovePath='';var currentMoveName='';"
+    "function moveFile(path,name){currentMovePath=path;currentMoveName=name;document.getElementById('moveFileName').textContent=name;document.getElementById('moveModalOverlay').classList.add('show');return false;}"
+    "function closeMoveModal(){document.getElementById('moveModalOverlay').classList.remove('show');}"
+    "function submitMove(){var dest=document.getElementById('moveDest').value;if(!dest)return;closeMoveModal();toastSpinner('Moving...');fetch('/moveFile?path='+encodeURIComponent(currentMovePath)+'&newFolder='+encodeURIComponent(dest),{credentials:'same-origin'}).then(function(r){if(r.ok)return r.text();throw new Error('Failed');}).then(function(txt){toastDone('Moved successfully');refreshListings();}).catch(function(){toastDone('Move failed',false);});}"
+    
     "function submitUpload(ev){ev.preventDefault();var form=document.getElementById('uploadForm');"
       "var fileInput=form.querySelector('input[type=file]');if(!fileInput.files.length){toastDone('Choose a file first',false);return false;}"
       "var fd=new FormData(form);var xhr=new XMLHttpRequest();xhr.open('POST','/upload',true);"
@@ -951,6 +999,23 @@ String getPageScript() {
       "else{toastDone('Upload failed',false);}};"
       "xhr.onerror=function(){toastDone('Upload failed',false);};"
       "toastSpinner('Uploading...');xhr.send(fd);return false;}"
+    "function createFolder(ev){ev.preventDefault();var name=document.getElementById('newFolderName').value;"
+      "if(!name)return false;if(!name.startsWith('/'))name='/'+name;"
+      "toastSpinner('Creating folder...');"
+      "fetch('/createFolder?name='+encodeURIComponent(name),{credentials:'same-origin'})"
+      ".then(function(r){if(r.ok)return r.text();throw new Error('Failed');}).then(function(txt){"
+      "toastDone('Folder Created');document.getElementById('newFolderName').value='';refreshListings();"
+      "}).catch(function(){toastDone('Failed (Already exists?)',false);});return false;}"
+    "function deleteFolder(path){if(!confirm('Delete folder '+path+'? Must be empty!'))return false;"
+      "toastSpinner('Deleting...'); fetch('/deleteFolder?path='+encodeURIComponent(path),{credentials:'same-origin'})"
+      ".then(function(r){if(r.ok)return r.text();throw new Error('Failed');}).then(function(txt){"
+      "toastDone('Folder Deleted');refreshListings();"
+      "}).catch(function(){toastDone('Delete failed (Ensure empty)',false);});return false;}"
+    "function renameFolder(path){var n=prompt('New folder name (e.g. /myfolder):', path);if(!n || n===path)return false;"
+      "toastSpinner('Renaming...');fetch('/renameFolder?path='+encodeURIComponent(path)+'&newName='+encodeURIComponent(n),{credentials:'same-origin'})"
+      ".then(function(r){if(r.ok)return r.text();throw new Error('Failed');}).then(function(txt){"
+      "toastDone('Folder Renamed');refreshListings();"
+      "}).catch(function(){toastDone('Rename failed',false);});return false;}"
     "</script>";
 }
 
@@ -975,6 +1040,7 @@ String buildFileRowHtml(const String& folderPathStr, const String& name, size_t 
          "<span class='file-size'>" + getFileSizeStr(size) + "</span>"
          "<span class='file-actions'>"
          "<a class='btn-icon' href=\"" + hrefPath + "\" download title='Download'>&#11015;</a>"
+         "<a class='btn-icon' href=\"#\" onclick=\"return moveFile('" + safePath + "','" + safeName + "');\" title='Move'>&#128194;</a>"
          "<a class='btn-icon' href=\"#\" onclick=\"return pushToDrive('" + safePath + "');\" title='Upload to Drive'>&#9729;</a>"
          "<a class='btn-icon' href=\"#\" onclick=\"return renameFile('" + safePath + "','" + safeName + "');\" title='Rename'>&#9998;</a>"
          "<a class='btn-icon btn-danger' href=\"#\" onclick=\"return deleteFile('" + safePath + "','" + safeName + "');\" title='Delete'>&#128465;</a>"
@@ -1006,17 +1072,29 @@ String genHomeNext(PageGenState* st) {
   }
 
   if (st->step == 1) {
-    const char* path = FOLDERS[st->folderIdx];
+    if (st->folderIdx >= activeFolders.size()) {
+      st->step = 2;
+      return "";
+    }
+    const String& path = activeFolders[st->folderIdx];
     
     // Open the manifest file instead of the directory
     if (!st->folderOpened) {
-      String manifestPath = String(path) + "/.manifest.txt";
+      String manifestPath = path + "/.manifest.txt";
       st->manifestFile = SD.open(manifestPath);
       st->folderOpened = true;
       st->folderAny = false;
+      
+      bool prot = (path == "/documents" || path == "/media/audio" || path == "/media/video" || path == "/synced");
+      String actions = "";
+      if (!prot) {
+         actions = "<a class='btn-icon' href='#' onclick=\"return renameFolder('" + escapeForJsAttr(path) + "');\" title='Rename Folder' style='height:24px;width:24px;font-size:0.7em;'>&#9998;</a>"
+                   "<a class='btn-icon btn-danger' href='#' onclick=\"return deleteFolder('" + escapeForJsAttr(path) + "');\" title='Delete Folder' style='height:24px;width:24px;font-size:0.7em;'>&#128465;</a>";
+      }
+
       return "<div class='card'><div class='card-header'>"
              "<h2>" + getFolderDisplayName(path) + "</h2>"
-             "<span class='card-path'>" + String(path) + "</span>"
+             "<div style='display:flex;gap:8px;align-items:center;'><span class='card-path'>" + path + "</span>" + actions + "</div>"
              "</div><div class='file-list'>";
     }
 
@@ -1028,7 +1106,7 @@ String genHomeNext(PageGenState* st) {
       // Skip empty lines or the manifest itself
       if (name.length() == 0 || name == ".manifest.txt") continue;
 
-      String fullPath = String(path) + "/" + name;
+      String fullPath = path + "/" + name;
       
       // Direct-path lookup for the actual file
       File entry = SD.open(fullPath);
@@ -1036,7 +1114,7 @@ String genHomeNext(PageGenState* st) {
         st->folderAny = true;
         size_t fileSize = entry.size();
         entry.close(); // Close immediately to save handles
-        return buildFileRowHtml(String(path), name, fileSize);
+        return buildFileRowHtml(path, name, fileSize);
       }
       if (entry) entry.close(); // Close if it was a directory or phantom entry
     }
@@ -1047,26 +1125,47 @@ String genHomeNext(PageGenState* st) {
     s += "</div></div>"; // close file-list, card
     st->folderOpened = false;
     st->folderIdx++;
-    if (st->folderIdx >= FOLDER_COUNT) {
-      st->step = 2;
-    }
     return s;
   }
 
   if (st->step == 2) {
     st->step = 3;
     String s = "</div>"; // close grid
+    
+    // Build folder options string for reuse in multiple select dropdowns
+    String folderOptions = "";
+    for (size_t i = 0; i < activeFolders.size(); i++) {
+        folderOptions += "<option value='" + activeFolders[i] + "'>" + getFolderDisplayName(activeFolders[i]) + "</option>";
+    }
+
+    // Folder Creation Panel
+    s += "<div class='panel'>"
+         "<h3>&#128193; Create Folder</h3>"
+         "<form class='upload-row' onsubmit='return createFolder(event);'>"
+         "<input type='text' id='newFolderName' placeholder='/newfolder' required pattern='^/.*'>"
+         "<button type='submit'>Create</button>"
+         "</form></div>";
+    
+    // File Upload Panel
     s += "<div class='panel'>"
          "<h3>&#11014; Upload a file</h3>"
          "<form id='uploadForm' class='upload-row' onsubmit='return submitUpload(event);'>"
-         "<select name='folder'>"
-         "<option value='/documents'>Documents</option>"
-         "<option value='/media/audio'>Music</option>"
-         "<option value='/media/video'>Video</option>"
-         "</select>"
+         "<select name='folder'>" + folderOptions + "</select>"
          "<input type='file' name='file'>"
          "<button type='submit'>Upload</button>"
          "</form></div>";
+
+    // Move File Modal (Hidden by default, triggered via JavaScript)
+    s += "<div id='moveModalOverlay' onclick=\"if(event.target===this)closeMoveModal();\">"
+         "<div id='moveModal'>"
+         "<h3>&#128194; Move File</h3>"
+         "<p style='margin:0;color:var(--text-dim);font-size:0.9em;'>Moving: <strong id='moveFileName' style='color:var(--text);'></strong></p>"
+         "<select id='moveDest'>" + folderOptions + "</select>"
+         "<div class='modal-actions'>"
+         "<button type='button' class='btn btn-secondary' onclick='closeMoveModal()'>Cancel</button>"
+         "<button type='button' class='btn' onclick='submitMove()'>Move</button>"
+         "</div></div></div>";
+         
     s += "</div>"; // close container
     s += getPageScript();
     s += "</body></html>";
@@ -1083,8 +1182,8 @@ void streamSearchResults(AsyncResponseStream* out, const String& query) {
   out->print("<div class='card'><div class='card-header'><h2>Search results for \"" + htmlEscape(query) + "\"</h2></div><div class='file-list'>");
   int matches = 0;
 
-  for (int i = 0; i < FOLDER_COUNT; i++) {
-    String manifestPath = String(FOLDERS[i]) + "/.manifest.txt";
+  for (size_t i = 0; i < activeFolders.size(); i++) {
+    String manifestPath = activeFolders[i] + "/.manifest.txt";
     File manifestFile = SD.open(manifestPath);
     if (!manifestFile) continue;
 
@@ -1097,7 +1196,7 @@ void streamSearchResults(AsyncResponseStream* out, const String& query) {
       nameLower.toLowerCase();
       
       if (nameLower.indexOf(q) != -1) {
-        String fullPath = String(FOLDERS[i]) + "/" + name;
+        String fullPath = activeFolders[i] + "/" + name;
         File entry = SD.open(fullPath);
         if (entry && !entry.isDirectory()) {
           
@@ -1117,6 +1216,7 @@ void streamSearchResults(AsyncResponseStream* out, const String& query) {
                   "<span class='file-size'>" + getFileSizeStr(entry.size()) + "</span>"
                   "<span class='file-actions'>"
                   "<a class='btn-icon' href=\"" + hrefPath + "\" download title='Download'>&#11015;</a>"
+                  "<a class='btn-icon' href=\"#\" onclick=\"return moveFile('" + safePath + "','" + safeName + "');\" title='Move'>&#128194;</a>"
                   "<a class='btn-icon btn-danger' href=\"#\" onclick=\"return deleteFile('" + safePath + "','" + safeName + "');\" title='Delete'>&#128465;</a>"
                   "</span>"
                   "</div>");
@@ -1169,6 +1269,7 @@ void setup() {
     Serial.println("SD card mount failed! Check wiring.");
   } else {
     Serial.println("SD card mounted.");
+    loadFolderManifest();
     ensureFolders();
   }
   
@@ -1240,6 +1341,7 @@ void setup() {
     Serial.print("Free heap after starting home page: ");
     Serial.println(ESP.getFreeHeap());
   });
+  
   // --- Streams audio/video for in-browser preview, authenticated via key or Basic Auth ---
   server.on("/mediaStream", HTTP_GET, [](AsyncWebServerRequest *request) {
     bool keyOk = request->hasParam("key") && request->getParam("key")->value() == String(PREVIEW_KEY);
@@ -1251,19 +1353,27 @@ void setup() {
       return;
     }
     String path = request->getParam("path")->value();
-    bool allowed = path.startsWith("/media/audio/") || path.startsWith("/media/video/");
-    if (!allowed || !SD.exists(path)) {
+    // Allow any folder now
+    if (!SD.exists(path)) {
       request->send(404, "text/plain", "Not found.");
       return;
     }
     request->send(SD, path, getMimeForPath(path)); // supports Range requests natively — seeking works
   });
 
-  // --- Serve files directly from SD with Range support (needed for video seeking) ---
-  server.serveStatic("/documents", SD, "/documents").setAuthentication(AUTH_USERNAME, AUTH_PASSWORD);
-  server.serveStatic("/media/audio", SD, "/media/audio").setAuthentication(AUTH_USERNAME, AUTH_PASSWORD);
-  server.serveStatic("/media/video", SD, "/media/video").setAuthentication(AUTH_USERNAME, AUTH_PASSWORD);
-  server.serveStatic("/synced", SD, "/synced").setAuthentication(AUTH_USERNAME, AUTH_PASSWORD);
+  // Since Folders are dynamic, we create a catch-all handler for file streaming statically
+  // This allows serving from any dynamic folder name
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) {
+      return request->requestAuthentication();
+    }
+    String path = request->url();
+    if (SD.exists(path) && !SD.open(path).isDirectory()) {
+       request->send(SD, path, getMimeForPath(path));
+    } else {
+       request->send(404, "text/plain", "File not found");
+    }
+  });
 
   // --- Remount SD card after a hot-swap, without rebooting (auth required) ---
   server.on("/remountSD", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -1293,20 +1403,144 @@ void setup() {
     );
   });
 
- 
   server.on("/pushToDrive", HTTP_GET, [](AsyncWebServerRequest *request) {
-  if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) {
-    return request->requestAuthentication();
-  }
-  if (!request->hasParam("path")) {
-    request->send(400, "text/html", "<p>Missing file path.</p><a href='/'>Go back</a>");
-    return;
-  }
-  pushPath = request->getParam("path")->value();
-  pushRequested = true;
-  request->send(200, "text/html",
-      "<h3>Upload Started</h3><p>Check Serial Monitor for progress.</p><a href='/'>Go back</a>");
-});
+    if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) {
+      return request->requestAuthentication();
+    }
+    if (!request->hasParam("path")) {
+      request->send(400, "text/html", "<p>Missing file path.</p><a href='/'>Go back</a>");
+      return;
+    }
+    pushPath = request->getParam("path")->value();
+    pushRequested = true;
+    request->send(200, "text/html",
+        "<h3>Upload Started</h3><p>Check Serial Monitor for progress.</p><a href='/'>Go back</a>");
+  });
+
+  // --- Move File ---
+  server.on("/moveFile", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) return request->requestAuthentication();
+    if (!request->hasParam("path") || !request->hasParam("newFolder")) { 
+        request->send(400, "text/plain", "Missing path or newFolder"); 
+        return; 
+    }
+    
+    String path = request->getParam("path")->value();
+    String newFolder = request->getParam("newFolder")->value();
+    
+    if (!newFolder.startsWith("/")) newFolder = "/" + newFolder;
+
+    int slash = path.lastIndexOf('/');
+    String oldFolder = (slash != -1) ? path.substring(0, slash) : "";
+    String filename = (slash != -1) ? path.substring(slash + 1) : path;
+    String newPath = newFolder + "/" + filename;
+
+    if (oldFolder == newFolder) {
+        request->send(400, "text/plain", "File is already in this folder.");
+        return;
+    }
+
+    if (!SD.exists(newFolder)) {
+        request->send(400, "text/plain", "Destination folder does not exist.");
+        return;
+    }
+
+    if (SD.rename(path, newPath)) {
+        removeFromManifest(oldFolder, filename);
+        appendToManifest(newFolder, filename);
+        request->send(200, "text/plain", "Moved successfully.");
+    } else {
+        request->send(500, "text/plain", "Move failed.");
+    }
+  });
+
+  // --- Create Folder ---
+  server.on("/createFolder", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) return request->requestAuthentication();
+    if (!request->hasParam("name")) { request->send(400, "text/plain", "Missing name"); return; }
+    String name = request->getParam("name")->value();
+    if (!name.startsWith("/")) name = "/" + name;
+    
+    if (SD.exists(name)) {
+      request->send(400, "text/plain", "Already exists");
+      return;
+    }
+    if (SD.mkdir(name)) {
+      activeFolders.push_back(name);
+      saveFolderManifest();
+      request->send(200, "text/plain", "Folder created");
+    } else {
+      request->send(500, "text/plain", "Create failed");
+    }
+  });
+
+  // --- Delete Folder ---
+  server.on("/deleteFolder", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) return request->requestAuthentication();
+    if (!request->hasParam("path")) { request->send(400, "text/plain", "Missing path"); return; }
+    String path = request->getParam("path")->value();
+    
+    if (path == "/" || path == "/documents" || path == "/media/audio" || path == "/media/video" || path == "/synced") {
+       request->send(400, "text/plain", "Cannot delete system folder"); return;
+    }
+
+    bool canDelete = true;
+    String manifestPath = path + "/.manifest.txt";
+    File m = SD.open(manifestPath);
+    if (m) {
+        while (m.available()) {
+            String line = m.readStringUntil('\n'); line.trim();
+            if (line.length() > 0 && line != ".manifest.txt") { canDelete = false; break; }
+        }
+        m.close();
+    }
+    
+    if (!canDelete) {
+        request->send(400, "text/plain", "Folder not empty");
+        return;
+    }
+    
+    if (SD.exists(manifestPath)) SD.remove(manifestPath);
+    
+    if (SD.rmdir(path)) {
+      for (auto it = activeFolders.begin(); it != activeFolders.end(); ++it) {
+        if (*it == path) {
+          activeFolders.erase(it);
+          break;
+        }
+      }
+      saveFolderManifest();
+      request->send(200, "text/plain", "Deleted");
+    } else {
+      request->send(500, "text/plain", "Delete failed. Ensure it is empty.");
+    }
+  });
+
+  // --- Rename Folder ---
+  server.on("/renameFolder", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->authenticate(AUTH_USERNAME, AUTH_PASSWORD)) return request->requestAuthentication();
+    if (!request->hasParam("path") || !request->hasParam("newName")) { request->send(400, "text/plain", "Missing args"); return; }
+    String path = request->getParam("path")->value();
+    String newName = request->getParam("newName")->value();
+    if (!newName.startsWith("/")) newName = "/" + newName;
+    
+    if (path == "/" || path == "/documents" || path == "/media/audio" || path == "/media/video" || path == "/synced") {
+       request->send(400, "text/plain", "Cannot rename system folder"); return;
+    }
+    
+    if (SD.rename(path, newName)) {
+      for (size_t i = 0; i < activeFolders.size(); i++) {
+        if (activeFolders[i] == path) {
+          activeFolders[i] = newName;
+          break;
+        }
+      }
+      saveFolderManifest();
+      request->send(200, "text/plain", "Renamed");
+    } else {
+      request->send(500, "text/plain", "Rename failed");
+    }
+  });
 
   // --- Delete a file (auth required) ---
   server.on("/deleteFile", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -1389,10 +1623,10 @@ void setup() {
     }
     Serial.println("\n===== DEBUG: RAW SD CARD CONTENTS =====");
     String out = "Raw SD card contents:\n\n";
-    for (int i = 0; i < FOLDER_COUNT; i++) {
-      Serial.println(FOLDERS[i] + String(":"));
-      out += String(FOLDERS[i]) + ":\n";
-      File dir = SD.open(FOLDERS[i]);
+    for (size_t i = 0; i < activeFolders.size(); i++) {
+      Serial.println(activeFolders[i] + String(":"));
+      out += activeFolders[i] + ":\n";
+      File dir = SD.open(activeFolders[i]);
       if (dir && dir.isDirectory()) {
         debugListFolder(dir, "  ", out);
         dir.close();
@@ -1476,7 +1710,6 @@ void setup() {
 }
 
 void loop() {
-
     if (syncRequested) {
         syncRequested = false;
         Serial.println();
@@ -1506,24 +1739,16 @@ void loop() {
         } else if (!refreshAccessToken()) {
           lastPushResult = "Failed to get Drive access token.";
         } else {
-
                   showStatus("Uploading...");
-              
                   if (uploadFileToDrive(pushPath)) {
-              
                       lastPushResult = "Uploaded " + pushPath + " successfully.";
-              
                       showStatus("Upload Done");
                       delay(1500);
-              
                   } else {
-              
                       lastPushResult = "Upload failed for " + pushPath + ".";
-              
                       showStatus("Upload Failed");
                       delay(1500);
                   }
-              
                   showDashboard();
               }
 
@@ -1532,7 +1757,6 @@ void loop() {
         Serial.println(lastPushResult);
         Serial.println("================================");
     }
-
     delay(1);
     yield();
 }

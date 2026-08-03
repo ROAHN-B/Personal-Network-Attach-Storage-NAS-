@@ -31,8 +31,8 @@ String lastPushResult = "No push performed yet.";
 
 // ---------- CONFIG: EDIT THESE ----------
 //NOTE:Frequency of WIFI should be at 2.4GHz
-const char* WIFI_SSID     = "";
-const char* WIFI_PASSWORD = "";
+const char* WIFI_SSID     = "Redmi 12 5G";
+const char* WIFI_PASSWORD = "123456789";
 const char* PREVIEW_KEY = "nasPreviewKey987" ;
 const char* HOSTNAME      = "mediaserver";   
 
@@ -49,17 +49,17 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define OLED_SDA 21
 #define OLED_SCL 22
 
-String ngrokURL = "";
+String ngrokURL = "https://media-server.app";
 
 // Authentication — change these before flashing!
-const char* AUTH_USERNAME = "";
-const char* AUTH_PASSWORD = "";
+const char* AUTH_USERNAME = "Admin";
+const char* AUTH_PASSWORD = "rohan123";
 
 // Google Drive — from get_refres_token.py output. Treat as secrets: don't share/commit.
-const char* DRIVE_CLIENT_ID     ="";
-const char* DRIVE_CLIENT_SECRET ="";
-const char* DRIVE_REFRESH_TOKEN ="";
-const char* DRIVE_FOLDER_ID     ="";
+const char* DRIVE_CLIENT_ID     ="791272166374-b9fusoesvns0kl2uj3fvt3g38op7vicf.apps.googleusercontent.com";
+const char* DRIVE_CLIENT_SECRET ="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";
+const char* DRIVE_REFRESH_TOKEN ="1//0g_Su_AynAq1_CgYIARAAGBASNwF-L9Irw2tvSJS98-VGQ1eANvo47AbpdfaVJ187sCf-x0M_wjwt2OwsMlCFZjHBzESUyEfLprY";
+const char* DRIVE_FOLDER_ID     ="1mTjQBYJD1DFc3kTTAXq3iaFaaMbVkaAZ";
 // -----------------------------------------
 
 AsyncWebServer server(80);
@@ -1463,6 +1463,11 @@ void setup() {
     if (SD.rename(path, newPath)) {
         removeFromManifest(oldFolder, filename);
         appendToManifest(newFolder, filename);
+        
+        showStatus("Moved File\n" + filename);
+        delay(1000);
+        showDashboard();
+        
         request->send(200, "text/plain", "Moved successfully.");
     } else {
         request->send(500, "text/plain", "Move failed.");
@@ -1483,6 +1488,11 @@ void setup() {
     if (SD.mkdir(name)) {
       activeFolders.push_back(name);
       saveFolderManifest();
+      
+      showStatus("Folder Created\n" + name);
+      delay(1000);
+      showDashboard();
+      
       request->send(200, "text/plain", "Folder created");
     } else {
       request->send(500, "text/plain", "Create failed");
@@ -1525,6 +1535,11 @@ void setup() {
         }
       }
       saveFolderManifest();
+      
+      showStatus("Folder Deleted\n" + path);
+      delay(1000);
+      showDashboard();
+      
       request->send(200, "text/plain", "Deleted");
     } else {
       request->send(500, "text/plain", "Delete failed. Ensure it is empty.");
@@ -1551,6 +1566,11 @@ void setup() {
         }
       }
       saveFolderManifest();
+      
+      showStatus("Folder Renamed\n" + newName);
+      delay(1000);
+      showDashboard();
+      
       request->send(200, "text/plain", "Renamed");
     } else {
       request->send(500, "text/plain", "Rename failed");
@@ -1574,6 +1594,11 @@ void setup() {
     String html;
     if (SD.remove(path)) {
       removeFromManifest(folder, filename);
+      
+      showStatus("File Deleted\n" + filename);
+      delay(1000);
+      showDashboard();
+      
       html = "<p>Deleted " + path + "</p>";
     } else {
       html = "<p>Failed to delete " + path + " (file may not exist).</p>";
@@ -1602,6 +1627,11 @@ void setup() {
     String html;
     if (SD.rename(path, newPath)) {
       renameInManifest(folder, oldName, newName);
+      
+      showStatus("File Renamed\n" + newName);
+      delay(1000);
+      showDashboard();
+      
       html = "<p>Renamed to " + newPath + "</p>";
     } else {
       html = "<p>Rename failed. Check the new name doesn't already exist.</p>";
@@ -1618,7 +1648,7 @@ void setup() {
     String q = request->hasParam("q") ? request->getParam("q")->value() : "";
     AsyncResponseStream *response = request->beginResponseStream("text/html");
     response->print("<html><head><title>Search</title>"
-                   "<meta name='viewport' content='width=device-width, initial-scale=1'>");
+                    "<meta name='viewport' content='width=device-width, initial-scale=1'>");
     response->print(getPageStyle());
     response->print("</head><body>"
             "<div class='topbar'><h1>&#128269; Search</h1>"
